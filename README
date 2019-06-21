@@ -1,0 +1,177 @@
+Ankush Hommerich-Dutt
+
+Motivation: Back in CS 2, we created an AI for the two player zero sum game Othello
+using minimax and alpha beta pruning. I recently was introduced to a game called
+Gomoku, which is essentially tic-tac-toe but it is played on a 15x15 board,
+and instead of 3 in a row, you must get 5. I thought that maybe I can speedup
+the game tree searching for the minimax algorithm on the GPU, and so that is what
+I attempted to do for this project.
+
+For the CPU implementation, I used a variant of minimax called negamax (which
+basically exploits the symmetry of the problem and performs the same operation
+regardless of whether you are the minimizing or maximizing player), which I will
+just refer to as minimax throughout this readme. The heuristic I used is
+described a bit more in my CPU demo readme and is irrelevant to the discussion here.
+The three main functions needed in minimax are of course the recursive minimax
+function itself, as well as function to generate possible moves given a board
+state, and a function to get the score of a board.
+
+There are two types of parallel game tree searching techniques: tree-based and
+node-based. Tree-based is where you assign an entire subtree to a processor (in our
+case to a thread), and node-based parallelism is where you assign only specific
+nodes at a time to a set of threads (i.e. to generate the next set of moves or
+to calculate the score of the board) and then they return. For this project, we
+went with the former because it is easier to implement.
+
+After reading a paper, a fairly simple tree-based parallel algorithm to
+implement on the GPU was as follows:
+
+    1. For total depth d of the game tree, choose a depth s such that s < d.
+    2. On one processor (i.e. the CPU which does this sequentially) traverse the
+       tree up to depth s and generate the set of leaves at that depth.
+    3. Assign each thread on the GPU one of these leaves, and then in parallel
+       each thread will search from depth s to final depth d and calculate the
+       score of the board, and then in turn find the minimax score of that beginning
+       leaf it started from at depth s.
+    4. Sequentially traverse the game tree from the root again on the CPU until
+       depth s, but now we have the scores at the minimax tree at depth s, and
+       we use those to return the best move.
+
+So essentially this algorithm traverses the root to depth s twice on the CPU, and
+traverses from depth s to depth d once on the GPU. In the paper I read, they
+used an iterative version of minimax since recursion was not supported on their
+compute capability that they had at the time, but on compute capability 3.0 and
+higher, the GPU does support recursion. Since titan is compute capability 3.5,
+I did not have to modify the recursive algorithm and just used that (of course
+turning minimax into an iterative algorithm will reduce the overhead of
+recursion, but the logic to turn minimax iterative is very non-trivial and
+I could not find good pseudocode for that online).
+
+The issue with attempting to parallelize tree searching on the GPU is that
+each board is inherently different, and so if you assign each thread a subtree,
+there will be lots of control flow logic with conditionals, and because the GPU
+is SIMT within a warp, then the warp will have a lot of divergence which means
+the parallelism is not as efficient as it could be. After thinking through how
+to resolve this (while still keeping a tree-based parallel search method), I
+could not come up with a good solution, since it is true that inherently every
+board is different and there is nothing you can do to change that a warp is SIMT.
+Luckily, I still saw quite a performance boost as I will explain more in detail.
+
+First, let me describe the structure of the files and code:
+
+    -The Board class, as well as methods on the board (such as making a move and
+     checking if a move is legal) are in board.cpp
+
+    -The Game class is simply a class that runs the actually repl loop on the
+    command line during a game that takes human input for a move, uses that
+    to generate the AI's move (whether it is CPU or GPU), and then print out the
+    board to get the next human input for a move. This is in game.cpp
+
+    -The CPU AI is in cpu_player.cpp, and the GPU AI is in gpu_player.cpp. The
+    GPU AI calls a kernel for the parallel search described above,
+    which is in kernels_minimax.cu.
+
+    -There are helper structs in common.hpp which pretty much every file includes.
+
+    -The gomoku.cpp file is what runs the main program, and what parses the
+    command line entries to set up the appropriate game in the Game class.
+
+    -The demo file is in demo.cpp
+
+So, for the purposes of the GPU side of the project, the algorithm mentioned above
+is implemented in gpu_player.cpp and kernels_minimax.cu. Specifically, to implement
+the above algorithm, I had a function in gpu_player.cpp that was called first_negamax
+which generates the set of leaves in an array of boards that is eventially called in the
+kernel. Within the kernel, each thread is assigned one of the boards, and then
+generates a score using a recursive negamax function. There are functions within
+the kernel to generate moves and get the score, which are essentially the
+same as the cpu versions except I had to use fixed arrays instead of vectors. The
+results for each board are in an array in the same order as the boards, and this
+array is copied back from the device to host. Then, using this array of scores,
+we call negamax again to depth s, but we use this array to get the scores. Since
+this was in the same order as the boards, we could just naively index into
+this array and return the correct score for the board (this was nice so we didn't
+have to use an expensive dictionary).
+
+Some GPU specific things I had to do was to change my board class methods to
+be compiled as both host and device code. Also, I had to change my makefile
+to correctly link the kernel object code with the board object code (I had
+to use nvcc to compile the board.cpp file into device object code). Also,
+I had to manually change the GPU to allocate more stack space per thread,
+as I was having an issue initially where my threads were running out of memory.
+I changed the stack space per thread from 1024 bytes to 50000 bytes, as this
+was enough to call the recursive negamax function within the kernel multiple times.
+
+I ran into a problem where if my parallel depth was too high, or if the number of
+leaves entering the kernel was too high, then my kernel would timeout. I would get
+the error: "GPUassert: the launch timed out and was terminated". After
+researching more, this is because of a watchdog timeout on the OS that is killing
+the kernel if it takes longer than a few seconds. Attempts to disable it were
+unsuccesful, and so the maximum depth achieved that stays within the time out
+limit are depth 5, where the GPU performs a parallel depth of 2 (and so the
+sequential depth is 3). I just hardcoded in the fact that the parallel depth
+is at most 2 (with a parallel depth of 3, the kernel times out), and so the
+sequential depth is just the total depth - 2.
+
+To run the code, enter "make" to generate the executable "run" and "demo".
+
+To play a game against the cpu or gpu, enter "./run cpu O 3" where the O is a
+capital o. This runs the game against the cpu as O and with a depth of 3.
+You can change O to X if you want the AI to play as X, and you can change the 3
+to whatever depth you want. Change from cpu to gpu if you want to play against
+the gpu AI.
+
+To actually enter a move in the game, type in the row number, press enter, and then type
+in the column, press enter. So to put a piece at (8,7), I would:
+
+8 'enter' 7 'enter'
+
+Enter 'q' to exit on your turn. There is no undoing moves and error handling
+of inputs supported at the moment, so be careful when entering in moves.
+
+There is a demo script provided that tests a game against both the cpu and gpu
+at depth 5 to ensure that the gpu outputs the same moves as the cpu given our input
+(this ensures correctness and serves as the test cases), and then it compares
+the runtimes of the GPU and CPU. The demo script plays one game on both AI's,
+and the entire script takes about 20 minutes to run (mostly because of CPU
+bottleneck), although you don't have to wait through it all as it is just
+simulating an entire game. The speedup factors of the GPU that should be
+outputted are in the range of about a 20x factor as the game goes on into the
+later stages. To run the script, just type in ./demo. Just read along with the
+output. I walk you through what is happening.
+
+Note that the timer for the gpu call includes not only the kernel call but
+the two sequential steps also, since we wanted to compare the entire move
+calculation process that was partially sped up on the gpu.
+
+In terms of code output, there is not much I can really say considering the output
+of the AI depends on your move and the specific game. But let's say you enter in (8,8),
+the gpu and cpu will respond with (7,7), and then if you follow with (8,7), then
+the gpu will respond with (8,6).
+
+So for the depths that I did not get a kernel timeout, we see a speedup of about
+20x. If there was someway to disable the kernel timeout, I suspect we could see
+speedups of 100x or even higher. I was genuinely surprised by how fast the
+GPU speedup actually was, given the fact that there must be siginificant
+warp divergence within each warp. Since the threads still step through the negamax
+function together as unit, I guess the tiny warp divergence due to each board being
+slightly different did not matter as much as I thought.
+
+Some improvements for the future: Instead of passing in a board of integers,
+which takes 4*225 bytes to represent, I could implement bitset on the GPU
+to save space of boards. Also, as mentioned earlier, I could implement an
+iterative minimax on the gpu to reduce the overhead of recursion.
+
+In terms of commenting, I commented the gpu_player.cpp and kernels_minimax.cu in detail,
+because those are the files relevant to the project. The other files have comments
+for very non-trivial parts, but otherwise sparse comments.
+
+Also note you can play two humans vs each other by just entering ./run. This mode
+supports undoing in the last move by entering 'u'
+
+Note: Me and Matt's project (his was the FreeCell solver) ended up becoming
+100% disjoint, with not a single line of code in common. We had initially intended
+to work more together on this project, but because my game was a two player game
+which I was trying to create a minimax AI for, and his was a single player game where
+he was trying to parallelize a solver for, we ended up not needing the same
+functions and therefore we did two completely different projects.
