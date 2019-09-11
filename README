@@ -149,13 +149,12 @@ of the AI depends on your move and the specific game. But let's say you enter in
 the gpu and cpu will respond with (7,7), and then if you follow with (8,7), then
 the gpu will respond with (8,6).
 
-So for the depths that I did not get a kernel timeout, we see a speedup of about
-20x. If there was someway to disable the kernel timeout, I suspect we could see
-speedups of 100x or even higher. I was genuinely surprised by how fast the
-GPU speedup actually was, given the fact that there must be siginificant
-warp divergence within each warp. Since the threads still step through the negamax
-function together as unit, I guess the tiny warp divergence due to each board being
-slightly different did not matter as much as I thought.
+So for the depths that I did not get a kernel timeout, we see a speedup of about 
+90x. I was genuinely surprised by how fast the GPU speedup actually was, 
+given the fact that there must be siginificant warp divergence within each warp. 
+Since the threads still step through the negamax function together as unit, I 
+guess the tiny warp divergence due to each board being slightly different did 
+not matter as much as I thought.
 
 Some improvements for the future: Instead of passing in a board of integers,
 which takes 4*225 bytes to represent, I could implement bitset on the GPU
